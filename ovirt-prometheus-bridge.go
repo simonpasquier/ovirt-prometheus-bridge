@@ -258,7 +258,6 @@ func refresher(client *http.Client, config *Config, logger log.Logger) func(ctx 
 			return nil, err
 		}
 
-		// TODO: add network labels
 		present := make(map[string]struct{}, len(hosts.Host))
 		tgs := make([]*targetgroup.Group, 0, len(hosts.Host))
 		for _, host := range hosts.Host {
