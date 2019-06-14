@@ -11,8 +11,10 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"regexp"
 	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/go-kit/kit/log"
@@ -167,7 +169,15 @@ func run(logger log.Logger) error {
 		refresher(client, &config, logger),
 	)
 
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		term := make(chan os.Signal, 1)
+		signal.Notify(term, os.Interrupt, syscall.SIGTERM)
+		<-term
+		logger.Log("msg", "Received SIGTERM, exiting...")
+		cancel()
+	}()
+
 	sdAdapter := adapter.NewAdapter(ctx, *target, "ovirt", discoverer, logger)
 	sdAdapter.Run()
 
@@ -226,6 +236,7 @@ func refresher(client *http.Client, config *Config, logger log.Logger) func(ctx 
 		}
 		req.Header.Add("Accept", "application/json")
 		req.SetBasicAuth(config.User, config.Password)
+		req = req.WithContext(ctx)
 
 		res, err := client.Do(req)
 		if err != nil {
