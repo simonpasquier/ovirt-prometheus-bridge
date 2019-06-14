@@ -9,9 +9,9 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/prometheus/common/model"
@@ -41,12 +41,13 @@ type Version struct {
 }
 
 type Cluster struct {
-	ID string
+	ID   string
+	Name string
 }
 
 type Config struct {
 	Target         string
-	URL            string
+	URL            *url.URL
 	User           string
 	Password       string
 	NoVerify       bool
@@ -68,21 +69,26 @@ func main() {
 	if *enginePassword == "" {
 		*enginePassword = os.Getenv("ENGINE_PASSWORD")
 	}
+	if *enginePassword == "" {
+		log.Fatal("No engine password supplied")
+	}
+
+	u, err := url.Parse(*engineURL)
+	if err != nil {
+		log.Fatal("Failed to parse URL:", *engineURL)
+	}
+	if u.Scheme != "https" {
+		log.Fatal("Only URLs starting with 'https' are supported")
+	}
+
 	config := Config{Target: *target,
-		URL:            *engineURL,
+		URL:            u,
 		User:           *engineUser,
 		Password:       *enginePassword,
 		NoVerify:       *noVerify,
 		EngineCA:       *engineCa,
 		UpdateInterval: time.Duration(*updateInterval) * time.Second,
 		TargetPort:     strconv.Itoa(*targetPort),
-	}
-
-	if !strings.HasPrefix(config.URL, "https") {
-		log.Fatal("Only URLs starting with 'https' are supported")
-	}
-	if config.Password == "" {
-		log.Fatal("No engine password supplied")
 	}
 
 	tlsConfig := &tls.Config{
@@ -117,8 +123,9 @@ func main() {
 var (
 	oVirtPrefix = model.MetaLabelPrefix + "ovirt_"
 
-	clusterPrefix  = oVirtPrefix + "cluster_"
-	clusterIDLabel = clusterPrefix + "id"
+	clusterPrefix    = oVirtPrefix + "cluster_"
+	clusterIDLabel   = clusterPrefix + "id"
+	clusterNameLabel = clusterPrefix + "name"
 
 	hostPrefix              = oVirtPrefix + "host_"
 	hostIDLabel             = hostPrefix + "id"
@@ -131,10 +138,16 @@ var (
 )
 
 func refresher(client *http.Client, config *Config) func(ctx context.Context) ([]*targetgroup.Group, error) {
-	last := make(map[string]struct{})
+	last := make(map[string]*targetgroup.Group)
 
 	return func(ctx context.Context) ([]*targetgroup.Group, error) {
-		req, err := http.NewRequest("GET", config.URL+"/ovirt-engine/api/hosts", nil)
+		u, err := config.URL.Parse("/ovirt-engine/api/hosts")
+		check(err)
+		q := u.Query()
+		q.Set("follow", "cluster")
+		u.RawQuery = q.Encode()
+
+		req, err := http.NewRequest("GET", u.String(), nil)
 		check(err)
 		req.Header.Add("Accept", "application/json")
 		req.SetBasicAuth(config.User, config.Password)
@@ -159,45 +172,50 @@ func refresher(client *http.Client, config *Config) func(ctx context.Context) ([
 			return nil, err
 		}
 
-		tgs := make([]*targetgroup.Group, 0, len(hosts.Host))
-		present := make(map[string]struct{})
+		groups := make(map[string]*targetgroup.Group)
 		for _, host := range hosts.Host {
-			tgs = append(tgs, createHostTarget(host, config.TargetPort))
-			present[host.ID] = struct{}{}
-			last[host.ID] = struct{}{}
+			group := groups[host.Cluster.ID]
+			if group == nil {
+				group = &targetgroup.Group{
+					Source: host.Cluster.ID,
+					Labels: model.LabelSet{
+						model.LabelName(clusterIDLabel):   model.LabelValue(host.Cluster.ID),
+						model.LabelName(clusterNameLabel): model.LabelValue(host.Cluster.Name),
+					},
+				}
+				groups[host.Cluster.ID] = group
+			}
+			group.Targets = append(group.Targets, createHostTarget(host, config.TargetPort))
 		}
 
-		// Send updates for hosts that have been removed since the last poll.
+		// Send updates for clusters that have been removed since the last poll.
 		for id := range last {
-			if _, ok := present[id]; !ok {
-				tgs = append(tgs, &targetgroup.Group{Source: id})
-				log.Printf("host %q removed", id)
+			if _, ok := groups[id]; !ok {
+				groups[id] = &targetgroup.Group{Source: id}
+				log.Printf("cluster %q removed", id)
 			}
 		}
-		last = present
+		last = groups
+
+		tgs := make([]*targetgroup.Group, 0, len(groups))
+		for _, v := range groups {
+			tgs = append(tgs, v)
+		}
 
 		return tgs, nil
 	}
 }
 
-func createHostTarget(h Host, port string) *targetgroup.Group {
-	return &targetgroup.Group{
-		Targets: []model.LabelSet{
-			model.LabelSet{
-				model.AddressLabel: model.LabelValue(h.Address + ":" + port),
-			}},
-		Labels: model.LabelSet{
-			model.LabelName(clusterIDLabel): model.LabelValue(h.Cluster.ID),
-
-			model.LabelName(hostIDLabel):             model.LabelValue(h.ID),
-			model.LabelName(hostNameLabel):           model.LabelValue(h.Name),
-			model.LabelName(hostExternalStatusLabel): model.LabelValue(h.ExternalStatus),
-			model.LabelName(hostStatusLabel):         model.LabelValue(h.Status),
-			model.LabelName(hostVersionLabel):        model.LabelValue(h.Version.FullVersion),
-			model.LabelName(hostLibvirtLabel):        model.LabelValue(h.Libvirt.FullVersion),
-			model.LabelName(hostTypeLabel):           model.LabelValue(h.Type),
-		},
-		Source: h.ID,
+func createHostTarget(h Host, port string) model.LabelSet {
+	return model.LabelSet{
+		model.AddressLabel:                       model.LabelValue(h.Address + ":" + port),
+		model.LabelName(hostIDLabel):             model.LabelValue(h.ID),
+		model.LabelName(hostNameLabel):           model.LabelValue(h.Name),
+		model.LabelName(hostExternalStatusLabel): model.LabelValue(h.ExternalStatus),
+		model.LabelName(hostStatusLabel):         model.LabelValue(h.Status),
+		model.LabelName(hostVersionLabel):        model.LabelValue(h.Version.FullVersion),
+		model.LabelName(hostLibvirtLabel):        model.LabelValue(h.Libvirt.FullVersion),
+		model.LabelName(hostTypeLabel):           model.LabelValue(h.Type),
 	}
 }
 

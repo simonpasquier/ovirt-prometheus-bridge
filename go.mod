@@ -5,4 +5,4 @@ require (
 	github.com/prometheus/prometheus v0.0.0-20190525122359-d20e84d0fb64
 )
 
-replace github.com/prometheus/prometheus => github.com/simonpasquier/prometheus v0.0.0-20190612151208-08b70c5e6cbb
+replace github.com/prometheus/prometheus => github.com/simonpasquier/prometheus v0.0.0-20190614092819-d9711c06873e
