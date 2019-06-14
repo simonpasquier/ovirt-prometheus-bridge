@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"time"
 
@@ -32,8 +33,17 @@ type Host struct {
 	Libvirt        Version `json:"libvirt_version,omitempty"`
 	Name           string
 	Status         string
+	Tags           Tags
 	Type           string
 	Version        Version
+}
+
+type Tags struct {
+	Tag []Tag
+}
+
+type Tag struct {
+	Name string
 }
 
 type Version struct {
@@ -121,6 +131,8 @@ func main() {
 }
 
 var (
+	invalidLabelCharRE = regexp.MustCompile(`[^a-zA-Z0-9_]`)
+
 	oVirtPrefix = model.MetaLabelPrefix + "ovirt_"
 
 	clusterPrefix    = oVirtPrefix + "cluster_"
@@ -135,6 +147,7 @@ var (
 	hostVersionLabel        = hostPrefix + "version"
 	hostLibvirtLabel        = hostPrefix + "libvirt_version"
 	hostTypeLabel           = hostPrefix + "type"
+	hostTagsPrefix          = hostPrefix + "tags_"
 )
 
 func refresher(client *http.Client, config *Config) func(ctx context.Context) ([]*targetgroup.Group, error) {
@@ -144,7 +157,7 @@ func refresher(client *http.Client, config *Config) func(ctx context.Context) ([
 		u, err := config.URL.Parse("/ovirt-engine/api/hosts")
 		check(err)
 		q := u.Query()
-		q.Set("follow", "cluster")
+		q.Set("follow", "cluster,tags")
 		u.RawQuery = q.Encode()
 
 		req, err := http.NewRequest("GET", u.String(), nil)
@@ -172,6 +185,8 @@ func refresher(client *http.Client, config *Config) func(ctx context.Context) ([
 			return nil, err
 		}
 
+		// TODO: loop over nics
+		// TODO: add network labels
 		groups := make(map[string]*targetgroup.Group)
 		for _, host := range hosts.Host {
 			group := groups[host.Cluster.ID]
@@ -207,7 +222,7 @@ func refresher(client *http.Client, config *Config) func(ctx context.Context) ([
 }
 
 func createHostTarget(h Host, port string) model.LabelSet {
-	return model.LabelSet{
+	ls := model.LabelSet{
 		model.AddressLabel:                       model.LabelValue(h.Address + ":" + port),
 		model.LabelName(hostIDLabel):             model.LabelValue(h.ID),
 		model.LabelName(hostNameLabel):           model.LabelValue(h.Name),
@@ -217,6 +232,10 @@ func createHostTarget(h Host, port string) model.LabelSet {
 		model.LabelName(hostLibvirtLabel):        model.LabelValue(h.Libvirt.FullVersion),
 		model.LabelName(hostTypeLabel):           model.LabelValue(h.Type),
 	}
+	for _, t := range h.Tags.Tag {
+		ls[model.LabelName(invalidLabelCharRE.ReplaceAllString(hostTagsPrefix+t.Name, "_"))] = model.LabelValue("present")
+	}
+	return ls
 }
 
 func check(e error) {
